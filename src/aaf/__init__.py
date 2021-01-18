@@ -4,18 +4,19 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 import time
-
+import ida_dbg
+import ida_kernwin
 import idc
-
 from aaf import utils
-from aaf.utils import fn_timer
-from aaf import DBGHook
+import logging
 
 class AndroidAttacher(object):
     def __init__(self, wrapper, utilsJar, config_file):
+
         self.packageName = None
         self.launchActivity = None
         self.android_server = None
@@ -31,25 +32,27 @@ class AndroidAttacher(object):
             self.bindir = os.path.abspath(idaapi.get_idcpath() + "/../dbgsrv")
 
     def load_config(self):
-        try:
-            with open(self.config_file, "r") as f:
-                return json.load(f, encoding="UTF-8")
-        except:
-            return {}
+        if os.path.exists(self.config_file):
+            try:
+                with open(self.config_file, "r") as f:
+                    return json.load(f, encoding="UTF-8")
+            except Exception as e:
+                logging.exception(e)
+        return {}
 
     def save_config(self, obj):
         try:
             with open(self.config_file, "w") as f:
-                json.dump(obj, f, encoding="UTF-8", ensure_ascii=False)
-        except:
-            pass
+                json.dump(obj, f, ensure_ascii=False)
+        except Exception as e:
+            logging.exception(e)
 
-    @fn_timer
+
     def _chooseDevice(self):
         self.device = self.adb.chooseDevice(self.device)
-        print 'Using device %s' % self.device
+        logging.info('Using device %s' % self.device)
 
-    @fn_timer
+
     def _getPid(self):
         ps = self.adb.call(['shell', 'ps']).splitlines()
         for x in ps:
@@ -58,10 +61,10 @@ class AndroidAttacher(object):
                 g = (col for col in xs if col.isdigit())
                 return int(next(g))
 
-    @fn_timer
+
     def _launch(self, debug):
         start = time.time()
-        idc.Message('Launching %s/%s... ' % (self.packageName, self.launchActivity))
+        ida_kernwin.msg('Launching %s/%s... ' % (self.packageName, self.launchActivity))
 
         args = ['shell', 'am', 'start', '-n', self.packageName + '/' + self.launchActivity, '-W']
         if debug:
@@ -80,9 +83,9 @@ class AndroidAttacher(object):
             time.sleep(0.2)
             if self._getPid():
                 break
-        print "Done in %s seconds" % (time.time() - start)
+        logging.info("Done in %s seconds" % (time.time() - start))
 
-    @fn_timer
+
     def _attach(self, debug):
         pid = self._getPid()
         if not pid:
@@ -95,22 +98,23 @@ class AndroidAttacher(object):
                 time.sleep(0.5)
 
         if not pid:
-            raise StandardError("Error attach %s/%s." % (self.packageName, self.launchActivity))
+            raise Exception("Error attach %s/%s." % (self.packageName, self.launchActivity))
         self.attach_app(pid)
         if debug:
             self.adb.forward('tcp:8700' , 'jdwp:' + str(pid))
+            from aaf import DBGHook
             self.dbg_hook=DBGHook.DBG_Hook()
             self.dbg_hook.hook()
 
-    @fn_timer
+
     def attach_app(self, pid):
-        idc.LoadDebugger("armlinux", 1)
-        idc.SetRemoteDebugger("localhost", "", self.port)
-        status = idc.AttachProcess(pid, -1)
+        ida_dbg.load_debugger("armlinux", 1)
+        ida_dbg.set_remote_debugger("localhost", "", self.port)
+        status = ida_dbg.attach_process(pid, -1)
         if status == 1:
-            print 'Attaching to pid %s... Done' % pid
+            logging.info('Attaching to pid %s... Done' % pid)
         else:
-            print 'Attaching to pid %s... Failed: %s' % (pid, status)
+            logging.info('Attaching to pid %s... Failed: %s' % (pid, status))
 
     def _chooseLaunchActivity(self, packageName):
         '''
@@ -118,64 +122,67 @@ class AndroidAttacher(object):
     if not packageApk:
       raise StandardError("Error find package apk: %s." % packageName)
     '''
-
+        activities=[]
         aaf_utils = "/data/local/tmp/aaf_utils.jar"
-        # print "Pushing utils.jar to device: %s" % aaf_utils
+        # logging.info "Pushing utils.jar to device: %s" % aaf_utils
         self.adb.push(self.utilsJar, aaf_utils)
-        out = self.adb.call(['shell', 'su', '-c',
+        try:
+            out = self.adb.call(['shell', 'su', 'root',
                              '"dalvikvm -cp ' + aaf_utils + ' com.android.internal.util.WithFramework com.fuzhu8.aaf.GetMainActivity ' + packageName + '"'])
-        resp = json.loads(out)
-        if resp["code"] != 0:
-            raise StandardError(resp["msg"])
-        main = utils.decode_list(resp["main"])
-        if len(main) == 1:
-            return main[0]
-        activities = utils.decode_list(resp["activities"])
-        if len(activities) == 1:
-            return activities[0]
+            resp = json.loads(out)
+            if resp["code"] != 0:
+                raise Exception(resp["msg"])
+            main = utils.decode_list(resp["main"])
+            if len(main) == 1:
+                return main[0]
+            activities = utils.decode_list(resp["activities"])
+            if len(activities) == 1:
+                return activities[0]
+        except Exception as e:
+            out = self.adb.call(['shell',"monkey -p %s -v -v -v 0"%packageName])
+            
+            for line in out.splitlines():
+                if "from package %s"%packageName in line:
+                    activities.append(re.search("main activity (.*?) ",line).group(1))
+            logging.info(activities)
+
         return utils.ChooserForm("Choose activity", activities).choose()
 
-    @fn_timer
-    def _startAndroidServer(self, skipShell=False, redirectOut=False):
+    def _startAndroidServer(self, app_64=False,skipShell=False, redirectOut=False):
         global androidServerSuOut
         global port
 
         ida_port = '-p' + str(self.android_server_port)
+        server_name='android_server'
+        if app_64:
+            server_name+="64"
         ps = self.adb.call(['shell', 'ps']).splitlines()
-        for proc in [x.split() for x in ps if 'android_server' in x]:
+        for proc in [x.split() for x in ps if server_name in x]:
             pid = next((col for col in proc if col.isdigit()))
             cmdline = self.adb.call(['shell', 'cat', '/proc/' + pid + '/cmdline']).split('\0')
             if ida_port not in cmdline:
                 continue
-            self.adb.call(['shell', 'su', '-c', '"kill -9 ' + pid + '"'])
+            self.adb.call(['shell', 'su', 'root', 'kill' ,'-9',str(pid)])
 
-        localServerPath = os.path.join(self.bindir, 'android_server')
-        androidServerPath = '/data/local/tmp/android_server'
-        remote = self.adb.call(["shell", "md5", androidServerPath]).split()[0]
-        md5 = hashlib.md5()
-        with open(localServerPath, "r") as f:
-            while True:
-                strRead = f.read(1024)
-                if not strRead:
-                    break
-                md5.update(strRead)
-
-        if md5.hexdigest() != remote:
-            print "Pushing android_server to device: %s" % androidServerPath
+        localServerPath = os.path.join(self.bindir, server_name)
+        
+        androidServerPath = '/data/local/tmp/'+server_name
+        lines = self.adb.call(["shell", "ls","-l", os.path.dirname(androidServerPath),"|","grep",server_name+"$"]).splitlines()
+        if len(lines)==0 or len(lines[0])==0:
+            logging.info("Pushing android_server to device: %s" % androidServerPath)
             self.adb.push(localServerPath, androidServerPath)
             self.adb.call(['shell', 'chmod', '755', androidServerPath])
 
         args = [ida_port]
 
-        @fn_timer
         def runAndroidServer(args):  # returns (proc, port, stdout)
             # print "runAndroidServer:", args
             proc = self.adb.call(args, stderr=subprocess.PIPE, async=True, preexec_fn=utils.androidServerPreExec)
-            need_watchdog = True
+            kill_watchdog = False
 
             def watchdog():
                 time.sleep(180)
-                if need_watchdog and proc.poll() is None:  # still running
+                if kill_watchdog and proc.poll() is None:  # still running
                     proc.terminate()
 
             (threading.Thread(target=watchdog)).start()
@@ -188,101 +195,71 @@ class AndroidAttacher(object):
             # Listening on 0.0.0.0:23946...
             out = []
             line = ' '
-            while line:
+            while 1:
                 try:
-                    line = proc.stdout.readline()
+                    line = proc.stdout.readline().decode("utf8")
                     # words = line.split()
                     # print "line:", line, "words:", words
                     out.append(line.rstrip())
                     if 'android_server terminated by' in line:
+                        logging.info("android_server terminated by")
                         break
                     if 'Listening' not in line:
+                        logging.info("not Listening")
                         continue
-
+                    if "Address already in use" in line:
+                        logging.info(line)
+                        break
                     if '#' in line:
                         start_index = line.index("#")
                     elif ':' in line:
                         start_index = line.index(":")
                     else:
-                        print "parse line failed: ", line
+                        logging.info("parse line failed: ", line)
                         continue
                     end_index = line.index("...")
                     port = line[start_index + 1: end_index]
 
                     if not port.isdigit():
-                        print "parse failed: port=", port, ", line=", line
+                        logging.info("parse failed: port=", port, ", line=", line)
                         continue
-                    need_watchdog = False
+                    kill_watchdog = True
+                    logging.info("normal exit watchdog")
                     return (proc, port, out)
-                except BaseException, e:
-                    print e
+                except BaseException as e:
+                    logging.exception(e)
             # not found, error?
-            need_watchdog = False
+            kill_watchdog = True
             return (None, None, out)
 
         # can we run as root?
         androidServerProc = None
+        if not androidServerProc:
+            logging.info('run as root:adb shell su root "%s"'%" ".join([androidServerPath] + args))
+            cmd=['shell', 'su' ,'root',androidServerPath]
+            if args:
+                cmd.extend(args)
+            (androidServerProc, port, androidServerSuOut) = runAndroidServer(cmd)
 
-        '''
-        if not androidServerProc:
-            idc.Message('as non-root... ')
-            androidServerArgs = ['shell', 'run-as', pkg, androidServerPath]
-            androidServerArgs.extend(args)
-            (androidServerProc, port, androidServerRunAsOut) = runAndroidServer(androidServerArgs)
-    
-        if not androidServerProc:
-            idc.Message('in pkg dir... ')
-            pkgAndroidServerPath = '/data/data/' + pkg + '/files/android_server'
-            self.adb.call(['shell', 'run-as', pkg, 'cp', androidServerPath, pkgAndroidServerPath])
-            self.adb.call(['shell', 'run-as', pkg, 'chmod', '755', pkgAndroidServerPath])
-            androidServerArgs = ['shell', 'run-as', pkg, pkgAndroidServerPath] + args
-            (androidServerProc, port, androidServerPkgRunAsOut) = runAndroidServer(androidServerArgs)
-        '''
 
         if not androidServerProc:
-            idc.Message('as root... ')
-            (androidServerProc, port, androidServerSuOut) = runAndroidServer(
-                ['shell', 'su', '-c', '"' + " ".join([androidServerPath] + args) + '"'])
-
-        '''
-        if not androidServerProc:
-            idc.Message('in pkg dir... ')
-            (androidServerProc, port, androidServerPkgSuOut) = runAndroidServer(['shell', 'su', '-c', '"' + " ".join([pkgAndroidServerPath] + args) + '"'])
-        '''
-
-        if not androidServerProc:
-            '''
-            print ''
-            print '"run-as" output:'
-            print ' ' + '\n '.join([s for s in androidServerRunAsOut if s]).replace('\0', '')
-            print '"run-as pkg" output:'
-            print ' ' + '\n '.join([s for s in androidServerPkgRunAsOut if s]).replace('\0', '')
-            '''
-            print '"su -c" output:'
-            print ' ' + '\n '.join([s for s in androidServerSuOut if s]).replace('\0', '')
-            '''
-            print '"su -c pkg" output:'
-            print ' ' + '\n '.join([s for s in androidServerPkgSuOut if s]).replace('\0', '')
-            if any('not executable: magic' in s for s in (androidServerRunAsOut + androidServerPkgRunAsOut + androidServerSuOut + androidServerPkgSuOut)):
-                print '\n********'
-                print '* Your device platform is not supported by this android_server'
-                print '********\n'
-            '''
-            raise StandardError('failed to run android_server')
+            logging.info('"su root" output:')
+            logging.info(' ' + '\n '.join([s for s in androidServerSuOut if s]).replace('\0', ''))
+            raise Exception('failed to run android_server')
 
         self.port = int(port)
         self.android_server = androidServerProc
 
         # forward the port that android_server gave us
         self.adb.forward('tcp:' + port, 'tcp:' + port)
-        print 'Done'
+        logging.info('Done')
 
-    @fn_timer
     def attach(self):
         try:
+            logging.info("start to attach")
             import idaapi
             if idaapi.is_debugger_on():
-                print "Already in debug mode."
+                logging.info("Already in debug mode.")
                 return
 
             is_running = self.android_server and self.android_server.poll() is None
@@ -291,15 +268,16 @@ class AndroidAttacher(object):
 
             config = self.load_config()
             av = utils.AttachView(self.device.getPackageNames(),
-                                  config["packageName"] if config.has_key("packageName") else "")
-            ret = av.show(config["idaDebugPort"] if config.has_key("idaDebugPort") else 23946,
-                          config["debug"] if config.has_key("debug") else False)
+                                  config["packageName"] if "packageName" in config else "")
+            ret = av.show(config["idaDebugPort"] if "idaDebugPort" in config else 23946,
+                          config["debug"] if "debug" in config else False,
+                          config["app_64"] if "app_64" in config else False)
             if not ret:
                 return
-            (packageName, idaDebugPort, debug) = ret
+            (packageName, idaDebugPort, debug ,app_64) = ret
 
             if idaDebugPort < 1024:
-                print "Attach %s failed with ida debug port: %s" % (packageName, idaDebugPort)
+                logging.info("Attach %s failed with ida debug port: %s" % (packageName, idaDebugPort))
                 return
             self.save_config({"packageName": packageName, "idaDebugPort": idaDebugPort, "debug": debug})
 
@@ -312,19 +290,18 @@ class AndroidAttacher(object):
             if not self.launchActivity:
                 return
 
-            print "Request attach:", packageName
+            logging.info("Request attach:%s"%packageName)
 
             if is_running:
                 self._attach(debug)
                 return
 
-            self._startAndroidServer()
+            self._startAndroidServer(app_64)
             self._attach(debug)
-        except BaseException, e:
+        except BaseException as e:
+            logging.exception(e)
             if self.android_server and self.android_server.poll() is None:
                 self.android_server.terminate()
-                print 'Terminated android_server.'
+                
+                logging.info('Terminated android_server.')
                 self.android_server = None
-
-            print e
-            # raise

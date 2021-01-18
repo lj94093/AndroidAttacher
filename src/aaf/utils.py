@@ -5,7 +5,7 @@ import platform
 import subprocess
 import time
 import functools
-
+import logging
 from idaapi import Form
 
 CALC_EXEC_TIME = False
@@ -45,31 +45,32 @@ class AttachView(Form):
                              "<## IDA Debug Port:{idaDebugPort}>\n"
                              "Launch Options"
                              " <Debug Mode:{debug}>{launchOptions}>\n"
+                             "app type      "
+                             " <is 64:{app_64}>{is_64}>\n"
                              "\n"
                              ), {'names': Form.DropdownListControl(items=names, readonly=True, selval=idx),
                                  'idaDebugPort': Form.NumericInput(tp=Form.FT_DEC),
-                                 "launchOptions": Form.ChkGroupControl(["debug"])})
+                                 "launchOptions": Form.ChkGroupControl(["debug"]),
+                                 "is_64": Form.ChkGroupControl(["app_64"])
+                                 })
         self.pns = names
         self.pn = packageName
 
-    def show(self, idaDebugPort, debug):
+    def show(self, idaDebugPort, debug,app_64):
         self.Compile()
         self.idaDebugPort.value = idaDebugPort
         self.debug.checked = debug
+        self.app_64.checked=app_64
         if self.Execute() != 1:
             return
-        return (self.pns[self.names.value], self.idaDebugPort.value, self.debug.checked)
+        return (self.pns[self.names.value], self.idaDebugPort.value, self.debug.checked,self.app_64.checked)
 
     def OnButtonNop(self, code=0):
         pass
 
 
-def isWindows():
-    return "Windows" in platform.system()
-
-
 def processWindows(**kw):
-    if isWindows():
+    if is_windows():
         if "preexec_fn" in kw:
             kw.pop("preexec_fn")
         startupinfo = subprocess.STARTUPINFO()
@@ -87,7 +88,7 @@ def fn_timer(function):
 
         start = time.time()
         ret = function(*args, **kw)
-        print "Total time running %s: %s seconds." % (function.func_name, time.time() - start)
+        logging.info("Total time running %s: %s seconds." % (function.func_name, time.time() - start))
         return ret
 
     return function_timer
@@ -120,3 +121,6 @@ def decode_list(data):
             item = item.encode('utf-8')
         rv.append(item)
     return rv
+
+def is_windows():
+    return 'Windows' == platform.system()

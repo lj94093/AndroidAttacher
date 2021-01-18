@@ -1,10 +1,10 @@
 import idaapi
-import utils
+from aaf import utils
 import os
 import subprocess
 import time
 import threading
-import adb
+from aaf import adb
 class DBG_Hook(idaapi.DBG_Hooks):
     def __init__(self):
         idaapi.DBG_Hooks.__init__(self)
@@ -15,7 +15,7 @@ class DBG_Hook(idaapi.DBG_Hooks):
                 time.sleep(3)
             self._resume_jdb()
             self.unhook()
-            print("unhooked the dbg")
+            logging.info("unhooked the dbg")
         (threading.Thread(target=watchdog)).start()
 
     def _resume_jdb(self):
@@ -38,7 +38,7 @@ class DBG_Hook(idaapi.DBG_Hooks):
             proc=subprocess.Popen([path,'-connect','com.sun.jdi.SocketAttach:hostname=127.0.0.1,port=8700'], stderr=subprocess.PIPE,startupinfo=startupinfo)
         else:
             proc=subprocess.Popen([path,'-connect','com.sun.jdi.SocketAttach:hostname=127.0.0.1,port=8700'], stderr=subprocess.PIPE)
-        print("jdb -connect finished")
+        logging.info("jdb -connect finished")
         need_watchdog = True
         def watchdog():
             time.sleep(3)

@@ -2,10 +2,13 @@
 # ! -*- coding: utf-8 -*-
 
 import os
+import subprocess
+import logging
 
-ADB_PATH = "/Users/zhkl0228/Library/Android/sdk//platform-tools/adb"
-
-
+import idaapi
+import idc
+import ida_kernwin
+import sys
 def get_plugin_home():
     import inspect
 
@@ -15,18 +18,35 @@ def get_plugin_home():
 
     return os.path.dirname(plugin_path)
 
-
-import sys
-
 sys.path.append(get_plugin_home())
 
-import idaapi
-import idc
 
-from aaf import utils
-
+def init_log(logFile="", isLog2File = False):
+    if isLog2File is False:
+        filename = None
+        stream = sys.stdout
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s %(filename)-22s[line:%(lineno)-4d] %(levelname)-6s %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            stream=stream,
+            filemode="w",
+        )
+    else:
+        stream = None
+        filename = logFile
+        if logFile is None:
+            filename = "wrapper.log"
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format='%(asctime)s %(filename)-22s[line:%(lineno)-4d] %(levelname)-6s %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S',
+            filename=filename,
+            filemode="w",
+        )
 
 class android_attacher_plugin(idaapi.plugin_t):
+    init_log()
     ACTION_NAME = "Attach to Android app"
 
     flags = idaapi.PLUGIN_KEEP
@@ -36,19 +56,21 @@ class android_attacher_plugin(idaapi.plugin_t):
     help = wanted_name + ": Debugger/" + ACTION_NAME
 
     def init(self):
+        # put import in code block for hot laod
+        from aaf import utils
         architecture = utils.getIdaArchitecture()
         if architecture != "arm":
-            print "%s unsupported architecture: %s" % (self.wanted_name, architecture)
+            logging.info("%s unsupported architecture: %s" % (self.wanted_name, architecture))
             return idaapi.PLUGIN_SKIP
 
-        idc.Message("Initializing %s\n" % self.wanted_name)
+        ida_kernwin.msg("Initializing %s\n" % self.wanted_name)
 
         from aaf import adb
-        wrapper = adb.AdbWrapper(ADB_PATH)
+        wrapper = adb.AdbWrapper("")
 
         from aaf import AndroidAttacher
         utilsJar = os.path.join(get_plugin_home(), "aaf", "utils.jar")
-        config_file = os.path.splitext(idc.GetIdbPath())[0] + ".aaf.conf"
+        config_file = os.path.splitext(idc.get_idb_path())[0] + ".aaf.conf"
         self.androidAttacher = AndroidAttacher(wrapper, utilsJar, config_file)
         return idaapi.PLUGIN_KEEP
 
